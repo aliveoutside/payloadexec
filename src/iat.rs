@@ -1,5 +1,7 @@
-use std::ffi::c_void;
+use core::ffi::{self, c_void};
 
+use alloc::string::String;
+use print_no_std::println;
 use windows::{
     Win32::{
         Foundation::FARPROC,
@@ -82,6 +84,6 @@ pub fn resolve_imports(
 
 unsafe fn get_string_from_rva(baseptr: *mut c_void, rva: u32) -> String {
     let str_ptr = unsafe { baseptr.add(rva as usize) } as *const i8;
-    let cstr = unsafe { std::ffi::CStr::from_ptr(str_ptr) };
+    let cstr = unsafe { ffi::CStr::from_ptr(str_ptr) };
     cstr.to_string_lossy().into_owned()
 }

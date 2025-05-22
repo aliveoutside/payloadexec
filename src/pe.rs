@@ -1,6 +1,8 @@
-use std::ffi::c_void;
+use core::{ffi::c_void, mem, ptr};
 
-use windows::Win32::System::{
+use alloc::string::String;
+use print_no_std::println;
+use windows::Win32::{Foundation::NTSTATUS, System::{
     Diagnostics::Debug::{
         IMAGE_DIRECTORY_ENTRY_BASERELOC, IMAGE_NT_HEADERS64, IMAGE_SECTION_HEADER,
     },
@@ -8,7 +10,10 @@ use windows::Win32::System::{
         IMAGE_BASE_RELOCATION, IMAGE_DOS_HEADER, IMAGE_DOS_SIGNATURE, IMAGE_NT_SIGNATURE,
         IMAGE_REL_BASED_ABSOLUTE, IMAGE_REL_BASED_DIR64,
     },
-};
+    Threading::GetCurrentProcess,
+}};
+
+use crate::ntapi::NtWriteVirtualMemory;
 
 pub fn write_sections(
     buffer: &[u8],
@@ -21,29 +26,32 @@ pub fn write_sections(
     let section_header = unsafe {
         buffer
             .as_ptr()
-            .add(e_lfanew + std::mem::size_of::<IMAGE_NT_HEADERS64>())
+            .add(e_lfanew + mem::size_of::<IMAGE_NT_HEADERS64>())
             .cast::<IMAGE_SECTION_HEADER>()
     };
 
     for _i in 0..section_count {
-        let section = unsafe { *section_header.add(_i) };
+        let section = unsafe { ptr::read_unaligned(section_header.add(_i)) };
         let section_name_str = String::from_utf8_lossy(section.Name.as_slice());
         println!("Section name: {}", section_name_str);
 
         let section_virtual_address = section.VirtualAddress as usize;
         let section_size = section.SizeOfRawData as usize;
 
-        let src = unsafe {
-            buffer
-                .as_ptr()
-                .add(section.PointerToRawData as usize)
-                .cast::<u8>()
-        };
-        let dst = unsafe { baseptr.add(section_virtual_address).cast::<u8>() };
+        let src = unsafe { buffer.as_ptr().add(section.PointerToRawData as usize) };
 
         unsafe {
-            std::ptr::copy(src, dst, section_size);
-        }
+            let status = NtWriteVirtualMemory(
+                GetCurrentProcess(),
+                baseptr.add(section_virtual_address as usize),
+                src as *const c_void,
+                section_size,
+                ptr::null_mut(),
+            );
+            if status != NTSTATUS(0) {
+                panic!("Failed to write section {}: {}", section_name_str, status.0);
+            }
+        };
     }
 }
 
@@ -84,11 +92,11 @@ pub fn fix_relocations(baseptr: *mut c_void, nt_header: &IMAGE_NT_HEADERS64) {
         let block_base_rva = reloc_block.VirtualAddress;
         let block_size = reloc_block.SizeOfBlock;
 
-        let num_entries = (block_size as usize - std::mem::size_of::<IMAGE_BASE_RELOCATION>())
-            / std::mem::size_of::<u16>();
+        let num_entries = (block_size as usize - mem::size_of::<IMAGE_BASE_RELOCATION>())
+            / mem::size_of::<u16>();
         let entry_ptr = unsafe {
             (current_reloc_block_ptr as *const u8)
-                .add(std::mem::size_of::<IMAGE_BASE_RELOCATION>())
+                .add(mem::size_of::<IMAGE_BASE_RELOCATION>())
                 .cast::<u16>()
         };
         for _i in 0..num_entries {
@@ -123,7 +131,7 @@ pub fn fix_relocations(baseptr: *mut c_void, nt_header: &IMAGE_NT_HEADERS64) {
 }
 
 pub fn get_dos_header(buffer: &[u8]) -> IMAGE_DOS_HEADER {
-    let dos_header = unsafe { *buffer.as_ptr().cast::<IMAGE_DOS_HEADER>() };
+    let dos_header = unsafe { ptr::read_unaligned(buffer.as_ptr().cast::<IMAGE_DOS_HEADER>()) };
     if dos_header.e_magic != IMAGE_DOS_SIGNATURE {
         panic!("Invalid DOS signature");
     };
@@ -133,10 +141,12 @@ pub fn get_dos_header(buffer: &[u8]) -> IMAGE_DOS_HEADER {
 pub fn get_nt_header(buffer: &[u8]) -> IMAGE_NT_HEADERS64 {
     let dos_header = get_dos_header(buffer);
     let nt_header = unsafe {
-        *(buffer
-            .as_ptr()
-            .add(dos_header.e_lfanew as usize)
-            .cast::<IMAGE_NT_HEADERS64>())
+        ptr::read_unaligned(
+            buffer
+                .as_ptr()
+                .add(dos_header.e_lfanew as usize)
+                .cast::<IMAGE_NT_HEADERS64>(),
+        )
     };
     if nt_header.Signature != IMAGE_NT_SIGNATURE {
         panic!("Invalid NT signature");
